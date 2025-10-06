@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rental Search</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; margin: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+    .grid > label { display: flex; flex-direction: column; font-size: 12px; }
+    input, select, button { padding: 8px; font-size: 14px; }
+    #results { margin-top: 16px; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 10px; }
+    .photos { display: flex; gap: 6px; overflow: auto; }
+    .photos img { height: 90px; border-radius: 6px; }
+    .meta { font-size: 13px; color: #444; }
+    .price { font-weight: 700; margin-top: 6px; }
+    .muted { color: #777; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>Search Rentals</h2>
+  <form id="searchForm">
+    <div class="grid">
+      <label>Beds Min<input type="number" name="beds_min" min="0" /></label>
+      <label>Beds Max<input type="number" name="beds_max" min="0" /></label>
+      <label>Rent Min<input type="number" name="rent_min" min="0" /></label>
+      <label>Rent Max<input type="number" name="rent_max" min="0" /></label>
+      <label>Keyword<input type="text" name="keyword" placeholder="e.g., Brighton, balcony" /></label>
+      <label>Order
+        <select name="order_by">
+          <option value="">Default</option>
+          <option value="rent_asc">Rent ↑</option>
+          <option value="rent_desc">Rent ↓</option>
+          <option value="date_desc">Newest</option>
+          <option value="date_asc">Oldest</option>
+        </select>
+      </label>
+    </div>
+    <div style="margin-top:10px;">
+      <button type="submit">Search</button>
+      <span id="status" class="muted"></span>
+    </div>
+  </form>
+
+  <div id="results"></div>
+
+  <script>
+    const API_BASE = ''; // same origin; if you host API elsewhere, put its full URL here
+    const form = document.getElementById('searchForm');
+    const results = document.getElementById('results');
+    const statusEl = document.getElementById('status');
+
+    function asInt(v) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : undefined; }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      results.innerHTML = '';
+      statusEl.textContent = 'Searching...';
+
+      const fd = new FormData(form);
+      const body = {
+        beds_min: asInt(fd.get('beds_min')),
+        beds_max: asInt(fd.get('beds_max')),
+        rent_min: asInt(fd.get('rent_min')),
+        rent_max: asInt(fd.get('rent_max')),
+        keyword: fd.get('keyword') || undefined,
+        order_by: fd.get('order_by') || undefined,
+        page: 1,
+        page_size: 30,
+        include_photos: true
+      };
+
+      try {
+        const r = await fetch(`${API_BASE}/api/rentals/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const json = await r.json();
+        statusEl.textContent = '';
+
+        if (!json?.success) {
+          statusEl.textContent = 'No results or an error occurred.';
+          console.error(json?.error || json);
+          return;
+        }
+
+        const data = json.data;
+        const items = findListings(data);
+        if (!items.length) {
+          statusEl.textContent = 'No listings found.';
+          return;
+        }
+
+        for (const item of items) {
+          const div = document.createElement('div');
+          div.className = 'card';
+          const photos = (item.photos || []).slice(0, 5);
+          div.innerHTML = `
+            <div class="photos">
+              ${photos.map(url => `<img src="${url}" loading="lazy" alt="photo" />`).join('')}
+            </div>
+            <div class="price">$${(item.rent ?? '—').toLocaleString?.() || item.rent || '—'}</div>
+            <div class="meta">${item.beds ?? '—'} bd • ${item.baths ?? '—'} ba • ${item.neighborhood || item.city || ''}</div>
+            <div class="muted">${item.address || ''}</div>
+            <div style="margin-top:8px;">
+              ${item.detail_url ? `<a href="${item.detail_url}" target="_blank" rel="noopener">View details</a>` : ''}
+            </div>
+          `;
+          results.appendChild(div);
+        }
+      } catch (err) {
+        statusEl.textContent = 'Error contacting the search service.';
+        console.error(err);
+      }
+    });
+
+    // Try to normalize common YGL shapes (tweak for your account)
+    function findListings(data) {
+      const candidates = [
+        data?.listings,
+        data?.response?.listings,
+        data?.response?.listing,
+        data?.rental_listings,
+        Array.isArray(data) ? data : null
+      ].filter(Boolean);
+
+      let arr = [];
+      for (const c of candidates) {
+        if (Array.isArray(c)) arr = c;
+        else if (typeof c === 'object') {
+          const vals = Object.values(c).flat();
+          if (vals.length) arr = vals;
+        }
+        if (arr.length) break;
+      }
+
+      return arr.map(x => ({
+        rent: num(x.rent || x.price || x.rent_amount),
+        beds: num(x.beds || x.bedrooms),
+        baths: num(x.baths || x.bathrooms),
+        neighborhood: x.neighborhood || x.area || x.city,
+        city: x.city,
+        address: x.address || [x.street_number, x.street_name].filter(Boolean).join(' '),
+        photos: extractPhotos(x),
+        detail_url: x.url || x.detail_url || null
+      }));
+
+      function num(v){ const n = parseFloat(v); return Number.isFinite(n) ? n : undefined; }
+      function extractPhotos(x){
+        if (Array.isArray(x.photos)) return x.photos;
+        if (x.photos?.photo) {
+          const p = Array.isArray(x.photos.photo) ? x.photos.photo : [x.photos.photo];
+          return p.map(p => p.url || p.src).filter(Boolean);
+        }
+        return [];
+      }
+    }
+  </script>
+</body>
+</html>
